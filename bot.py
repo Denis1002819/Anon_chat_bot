@@ -1,108 +1,73 @@
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from aiogram.utils import executor
-from aiogram.dispatcher.filters import CommandStart
-from aiogram.dispatcher import FSMContext
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher.filters.state import State, StatesGroup
 import logging
-import asyncio
+from aiogram import Bot, Dispatcher, executor, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
 
-API_TOKEN = "ТОКЕН_ЗДЕСЬ"
-ADMINS = [123456789]  # замените на ID админа
-ADMIN_GROUP_ID = -4869342056  # ID группы с админами
+API_TOKEN = '6428099161:AAGrZB9WKRQmjI5dcToFgkJktR_mhG6xU0E'
+ADMINS = [6774188449]
+ADMIN_GROUP_ID = -1002529705243  # обновлённый ID группы
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
-class UserState(StatesGroup):
-    waiting = State()
-    connected = State()
+class Form(StatesGroup):
+    chatting = State()
 
-user_admin_map = {}
-admin_user_map = {}
+# Кнопки
+start_kb = InlineKeyboardMarkup().add(InlineKeyboardButton("✅ Начать", callback_data="start_chat"))
+user_kb = InlineKeyboardMarkup(row_width=2).add(
+    InlineKeyboardButton("❌ Остановить", callback_data="stop_chat"),
+    InlineKeyboardButton("🔁 Сменить админа", callback_data="change_admin")
+)
+admin_kb = InlineKeyboardMarkup().add(InlineKeyboardButton("❌ Остановить", callback_data="admin_stop"))
 
-# Команды пользователя
-@dp.message_handler(commands=['start'], state='*')
-async def cmd_start(message: types.Message, state: FSMContext):
-    markup = ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(KeyboardButton("🚀 Начать"))
-    await message.answer("📌 Правила:
-— Без 18+
-— Без выяснения личности
+@dp.message_handler(commands="start")
+async def start_cmd(message: types.Message, state: FSMContext):
+    await state.finish()
+    await message.answer("""📌 Правила:
+1. Никакого 18+ контента
+2. Без выяснения личности
+3. Общение строго анонимно
+""", reply_markup=start_kb)
 
-Нажми «Начать», чтобы продолжить.", reply_markup=markup)
-    await UserState.waiting.set()
-
-@dp.message_handler(lambda msg: msg.text == "🚀 Начать", state=UserState.waiting)
-async def handle_start_chat(message: types.Message, state: FSMContext):
+@dp.callback_query_handler(lambda c: c.data == "start_chat")
+async def start_chat(cb: types.CallbackQuery, state: FSMContext):
+    await cb.message.delete()
+    await cb.message.answer("🔄 Ожидание администратора...", reply_markup=user_kb)
     for admin_id in ADMINS:
-        await bot.send_message(admin_id, f"📬 Новая заявка от пользователя ID {message.from_user.id}", reply_markup=types.InlineKeyboardMarkup().add(
-            types.InlineKeyboardButton("Принять", callback_data=f"accept_{message.from_user.id}")
+        await bot.send_message(admin_id, f"💬 Новая заявка от пользователя {cb.from_user.id}", reply_markup=InlineKeyboardMarkup().add(
+            InlineKeyboardButton("✅ Принять", callback_data=f"accept_{cb.from_user.id}")
         ))
-    await bot.send_message(ADMIN_GROUP_ID, f"📬 Новая заявка от пользователя ID {message.from_user.id}")
-    await message.answer("⏳ Ожидай, пока админ подключится...")
+    await bot.send_message(ADMIN_GROUP_ID, f"💬 Новая заявка от пользователя {cb.from_user.id}")
 
 @dp.callback_query_handler(lambda c: c.data.startswith("accept_"))
-async def accept_chat(callback: types.CallbackQuery):
-    user_id = int(callback.data.split("_")[1])
-    admin_id = callback.from_user.id
+async def accept_chat(cb: types.CallbackQuery, state: FSMContext):
+    user_id = int(cb.data.split("_")[1])
+    await state.update_data(user=user_id, admin=cb.from_user.id)
+    await bot.send_message(cb.from_user.id, f"✅ Вы подключены к пользователю {user_id}", reply_markup=admin_kb)
+    await bot.send_message(user_id, "✅ Админ подключился. Вы можете писать.")
+    await state.set_state(Form.chatting)
 
-    if admin_id in admin_user_map:
-        await callback.answer("❌ У вас уже есть активный пользователь.")
-        return
+@dp.message_handler(state=Form.chatting)
+async def chat_flow(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    if message.from_user.id == data.get("admin"):
+        await bot.send_message(data["user"], f"👤 Админ:\n{message.text}", reply_markup=user_kb)
+    elif message.from_user.id == data.get("user"):
+        await bot.send_message(data["admin"], f"🙋‍♂️ Пользователь:\n{message.text}", reply_markup=admin_kb)
 
-    user_admin_map[user_id] = admin_id
-    admin_user_map[admin_id] = user_id
-
-    await bot.send_message(user_id, "✅ Админ подключился! Можешь писать.")
-    await bot.send_message(admin_id, "✅ Вы подключены к пользователю.")
-    await callback.answer()
-
-    await dp.current_state(user=user_id).set_state(UserState.connected)
-
-@dp.message_handler(lambda msg: msg.text == "⛔ Остановить", state=UserState.connected)
-async def stop_chat_user(message: types.Message, state: FSMContext):
-    admin_id = user_admin_map.get(message.from_user.id)
-    if admin_id:
-        await bot.send_message(admin_id, "❌ Пользователь завершил диалог.")
-        del admin_user_map[admin_id]
-        del user_admin_map[message.from_user.id]
-    await message.answer("❌ Диалог завершён.")
+@dp.callback_query_handler(lambda c: c.data in ["stop_chat", "change_admin", "admin_stop"], state=Form.chatting)
+async def stop_chat(cb: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    reason = "Остановлено пользователем." if cb.data != "admin_stop" else "Остановлено админом."
+    if cb.from_user.id == data.get("user") or cb.from_user.id == data.get("admin"):
+        await bot.send_message(data["user"], f"🔒 Чат завершён.\n{reason}")
+        await bot.send_message(data["admin"], f"🔒 Чат завершён.\n{reason}")
     await state.finish()
 
-@dp.message_handler(lambda msg: msg.text == "🔁 Сменить админа", state=UserState.connected)
-async def switch_admin(message: types.Message, state: FSMContext):
-    old_admin = user_admin_map.get(message.from_user.id)
-    if old_admin:
-        await bot.send_message(old_admin, "🔁 Пользователь запросил нового админа.")
-        del admin_user_map[old_admin]
-        del user_admin_map[message.from_user.id]
-    await cmd_start(message, state)
-
-@dp.message_handler(lambda msg: msg.from_user.id in admin_user_map.values(), state='*')
-async def admin_stop_chat(message: types.Message):
-    if message.text == "⛔ Остановить":
-        user_id = admin_user_map.get(message.from_user.id)
-        if user_id:
-            await bot.send_message(user_id, "❌ Админ завершил диалог.")
-            del user_admin_map[user_id]
-            del admin_user_map[message.from_user.id]
-            await message.answer("❌ Диалог завершён.")
-
-@dp.message_handler(lambda msg: msg.from_user.id in user_admin_map, state=UserState.connected)
-async def relay_user_message(message: types.Message):
-    admin_id = user_admin_map[message.from_user.id]
-    await bot.send_message(admin_id, f"👤 Пользователь:
-{message.text}")
-
-@dp.message_handler(lambda msg: msg.from_user.id in admin_user_map)
-async def relay_admin_message(message: types.Message):
-    user_id = admin_user_map[message.from_user.id]
-    await bot.send_message(user_id, f"🛡 Админ:
-{message.text}")
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     executor.start_polling(dp, skip_updates=True)
