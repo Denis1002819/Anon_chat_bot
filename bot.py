@@ -42,4 +42,5 @@ async def start_chat(cb: types.CallbackQuery, state: FSMContext):
         text=f"💬 Новая заявка от пользователя `{user_id}`",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup().add(
-            InlineKeyboardButton("🟢 Принять", callback_dat_
+    InlineKeyboardButton("🟢 Принять", callback_data=f"accept_user_{user_id}")
+)
