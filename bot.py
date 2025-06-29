@@ -5,7 +5,7 @@ from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 
-API_TOKEN = '6428099161:AAGrZB9WKRQmjI5dcToFgkJktR_mhG6xU0E'
+API_TOKEN = '8139186032:AAG-vUK1grO-R_II8AxCwmb20k-dKYC7bxQ'
 ADMINS = [6774188449]
 ADMIN_GROUP_ID = -1002529705243  # обновлённый ID группы
 
