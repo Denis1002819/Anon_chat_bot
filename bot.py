@@ -1,89 +1,96 @@
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils import executor
+from aiogram.contrib.middlewares.logging import LoggingMiddleware
 
-API_TOKEN = "8139186032:AAG-vUK1grO-R_II8AxCwmb20k-dKYC7bxQ"
-ADMIN_GROUP_ID = -1002529705243
+from aiogram.dispatcher import filters
+from aiogram.dispatcher.filters import CommandStart
+from aiogram.dispatcher.handler import CancelHandler
+from aiogram.dispatcher.middlewares import BaseMiddleware
+
+import logging
+from collections import defaultdict
+
+API_TOKEN = '8139186032:AAG-vUK1grO-R_II8AxCwmb20k-dKYC7bxQ'
+ADMIN_GROUP_ID = -1002529705243  # ID группы с админами
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
+dp.middleware.setup(LoggingMiddleware())
 
-# Клавиатура пользователя
-user_start_kb = InlineKeyboardMarkup(row_width=1).add(
-    InlineKeyboardButton("✅ Принять правила и начать", callback_data="start_chat")
-)
+# Пары user_id <-> admin_id
+active_chats = defaultdict(dict)
 
-# Клавиатура админа
-admin_kb = InlineKeyboardMarkup().add(
-    InlineKeyboardButton("✅ Принять", callback_data="admin_accept"),
-    InlineKeyboardButton("⛔ Отклонить", callback_data="admin_reject")
-)
-
-# Клавиатура управления для пользователя
-user_control_kb = InlineKeyboardMarkup().add(
-    InlineKeyboardButton("🛑 Остановить", callback_data="user_stop"),
-    InlineKeyboardButton("♻️ Сменить админа", callback_data="user_switch")
-)
-
-# Клавиатура управления для админа
-admin_control_kb = InlineKeyboardMarkup().add(
-    InlineKeyboardButton("🛑 Остановить", callback_data="admin_stop")
-)
-
-
-@dp.message_handler(commands=['start'])
-async def send_rules(message: types.Message):
+# Старт для пользователя
+@dp.message_handler(CommandStart())
+async def send_welcome(message: types.Message):
+    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("🚀 Начать", callback_data="start_chat"))
     await message.answer(
-        "📌 Правила:\n1. Запрещено оскорбление\n2. Нельзя отправлять запрещённый контент\n3. Соблюдай вежливость",
-        reply_markup=user_start_kb
+        "📌 Правила:\n1. Общение происходит анонимно\n2. Не передавайте свои контакты\n\nНажмите кнопку ниже, чтобы начать.",
+        reply_markup=kb
     )
 
-
-@dp.callback_query_handler(lambda cb: cb.data == "start_chat")
+# Пользователь нажал "начать"
+@dp.callback_query_handler(lambda c: c.data == "start_chat")
 async def start_chat(cb: types.CallbackQuery):
-    user_id = cb.from_user.id
-    await cb.message.delete()
+    await cb.message.edit_text("⏳ Ожидаем подтверждения от администратора...")
 
-    request_msg = await bot.send_message(
-        ADMIN_GROUP_ID,
-        f"💬 Новая заявка от пользователя {user_id}",
-        reply_markup=InlineKeyboardMarkup().add(
-            InlineKeyboardButton("🟢 Принять", callback_data=f"accept_{user_id}"),
-            InlineKeyboardButton("🔴 Отклонить", callback_data=f"reject_{user_id}")
-        )
+    markup = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("🟢 Принять", callback_data=f"accept_{cb.from_user.id}"),
+        InlineKeyboardButton("🔴 Отклонить", callback_data=f"reject_{cb.from_user.id}")
     )
 
-    await cb.message.answer("⏳ Заявка отправлена. Ожидайте ответа от администратора.")
+    await bot.send_message(
+        ADMIN_GROUP_ID,
+        f"💬 Новая заявка от пользователя",
+        reply_markup=markup
+    )
 
-
-@dp.callback_query_handler(lambda cb: cb.data.startswith("accept_"))
+# Админ нажал "Принять"
+@dp.callback_query_handler(lambda c: c.data.startswith("accept_"))
 async def accept_user(cb: types.CallbackQuery):
     user_id = int(cb.data.split("_")[1])
-    await bot.send_message(user_id, "✅ Ваша заявка одобрена!", reply_markup=user_control_kb)
-    await cb.message.edit_text(f"✅ Пользователь {user_id} принят.")
+    admin_id = cb.from_user.id
 
+    active_chats[user_id]['admin'] = admin_id
+    active_chats[admin_id]['user'] = user_id
 
-@dp.callback_query_handler(lambda cb: cb.data.startswith("reject_"))
+    await bot.send_message(user_id, "✅ Вас подключили к чату с админом. Напишите сообщение.")
+    await bot.send_message(admin_id, "✅ Вы подключены к пользователю. Напишите сообщение.")
+
+# Админ нажал "Отклонить"
+@dp.callback_query_handler(lambda c: c.data.startswith("reject_"))
 async def reject_user(cb: types.CallbackQuery):
     user_id = int(cb.data.split("_")[1])
-    await bot.send_message(user_id, "❌ Ваша заявка отклонена.")
-    await cb.message.edit_text(f"❌ Пользователь {user_id} отклонён.")
+    await bot.send_message(user_id, "❌ Админ отклонил запрос.")
 
+# Обработка всех сообщений
+@dp.message_handler()
+async def relay_messages(message: types.Message):
+    uid = message.from_user.id
+    if uid in active_chats:
+        partner_id = active_chats[uid].get('admin') or active_chats[uid].get('user')
+        if partner_id:
+            forwarded = await bot.forward_message(partner_id, message.chat.id, message.message_id)
+        else:
+            await message.reply("⏳ Ожидайте подключения...")
+    else:
+        await message.reply("⏳ Вы не подключены. Нажмите /start")
 
-@dp.callback_query_handler(lambda cb: cb.data in ["user_stop", "user_switch"])
-async def handle_user_control(cb: types.CallbackQuery):
-    if cb.data == "user_stop":
-        await cb.message.answer("🛑 Вы остановили чат.")
-    elif cb.data == "user_switch":
-        await cb.message.answer("♻️ Запрос на смену админа отправлен.")
-    await cb.answer()
+# Остановка чата
+@dp.message_handler(commands=["stop"])
+async def stop_chat(message: types.Message):
+    uid = message.from_user.id
+    if uid in active_chats:
+        partner_id = active_chats[uid].get('admin') or active_chats[uid].get('user')
+        await bot.send_message(partner_id, "🚫 Собеседник завершил чат.")
+        await message.reply("❌ Вы завершили чат.")
 
+        del active_chats[partner_id]
+        del active_chats[uid]
+    else:
+        await message.reply("Вы не находитесь в чате.")
 
-@dp.callback_query_handler(lambda cb: cb.data == "admin_stop")
-async def handle_admin_stop(cb: types.CallbackQuery):
-    await cb.message.answer("🛑 Админ остановил чат.")
-    await cb.answer()
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
     executor.start_polling(dp, skip_updates=True)
